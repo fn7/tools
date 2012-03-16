@@ -8,31 +8,39 @@ use Time::Piece;
 use File::Temp qw/tempdir/;
 use YAML;
 
-my $dir = $ARGV[0] or die "argument error: \$1 must be specified\n";
-my $conf = YAML::LoadFile("$dir/backup.yml");
+my $dir = $ARGV[0];
+die "argument error: \$1 must be specified\n" unless $dir;
+die "directory not found: $dir\n" unless -e $dir && -f_;
+my $yaml = "$dir/backup.yml";
+die "config not found: $yaml\n" unless -e $yaml && -f _;
+my $conf = YAML::LoadFile( $yaml );
 =cut
 ---
-backupdir: /mnt/works/backup/stage/hogehoge.com
-remotedir: hogehoge.com:~/
+target: hogehoge.com:~/
+backup_repository: /mnt/works/backup/stage/hogehoge.com
 exclude_pattern: 
   - .*
-  - ftpuser
-  - system/images
-  - local/lib
-  - local/var
-  - local/man
-  - misc/export/archives
 =cut
 
 
-my $BACKUPDIR = $conf->{backupdir};
-my $REMOTEDIR = $conf->{remotedir};
-my @EXCLUDE_PATTERNS = @{$conf->{exclude_pattern} || []};
+my $TARGET = $conf->{target};
+$TARGET =~ s/\/$//;
+my $GIT_REPOSITORY = $conf->{backup_repository};
+my $EXCLUDE_PATTERNS = $conf->{exclude_pattern} || [];
+
+my $username = `whoami`;
+my $hostname = `hostname`;
+chomp $username;
+chomp $hostname;
+my $GIT_CONFIG_NAME = $username; 
+my $GIT_CONFIG_EMAIL = "${username}\@${hostname}";
+
+
 my $bar = '='x80;
 print <<"EOD";
 $bar
-\tremote : $REMOTEDIR
-\t -> backup : $BACKUPDIR
+\tremote : $TARGET
+\t -> backup : $GIT_REPOSITORY
 $bar
 EOD
 print "backup? [yN]\n";
@@ -52,30 +60,71 @@ my @EXCLUDE_PATTERNS = qw|
   misc/export
 |;
 =cut
-unless ( -e $BACKUPDIR && -d _) {
-   dir($BACKUPDIR)->mkpath;
-}
- 
+
 # バックアップを作成する
-backup();
+my $basename = dir( $GIT_REPOSITORY )->basename;
+$basename =~ s/\.git$//;
+
+my $tempdir = tempdir( CLEANUP => 1 );
+my $working_directory = "$tempdir/$basename";
+my $status_code;
+my $cwd = Cwd::cwd;
+eval {
+  create_repository_if_not_exists( $GIT_REPOSITORY );
+  prepare_backup( $tempdir, $GIT_REPOSITORY );
+  rsync_backup( $TARGET, $working_directory, $EXCLUDE_PATTERNS );
+  commit_and_push_repository( $working_directory, $GIT_CONFIG_NAME, $GIT_CONFIG_EMAIL );
+  $status_code = 0;
+};
+if ($@) {
+  warn "ERROR: $@\n";
+  $status_code = 1;
+}
+chdir $cwd;
+exit $status_code;
 
 
-sub backup{
-  chdir $BACKUPDIR;
-  unless ( -e "$BACKUPDIR/.git" ) {
-     system('git init');
-     system('git config user.name fn7');
-     system('git config user.email fn7@localhost');
+sub create_repository_if_not_exists {
+  my ( $repository ) = @_;
+  my $cwd = Cwd::cwd;
+  unless ( -e $repository && -d _) {
+    dir( $repository )->mkpath;
+    chdir $repository;
+    system('git init --bare');
   }
-  my $rsync_backup = sprintf q{rsync -e ssh -avh --delete %s %s %s},
-    $REMOTEDIR,
-    join(' ', map {"--exclude=$_"} @EXCLUDE_PATTERNS),
-    $BACKUPDIR;
+  chdir $cwd;
+}
 
-  system($rsync_backup);
-  system('git add .');
+sub prepare_backup {
+  my ( $directory, $repository ) = @_;
+  my $cwd = Cwd::cwd;
+  chdir $directory;
+  system( "git clone $repository" );
+  chdir $cwd;
+}
+
+sub rsync_backup {
+  my ( $target, $directory, $exclude_patterns ) = @_;
+  system( sprintf q{rsync -e ssh -avh --delete %s %s %s},
+    $target,
+    join(' ', map {"--exclude=$_"} @$exclude_patterns),
+    $directory,
+  );
+}
+
+sub commit_and_push_repository {
+  my ( $directory, $name, $email ) = @_;
+  my $cwd = Cwd::cwd;
+  chdir $directory;
+  unless ( -e '.git' ) {
+    die ".git not found: $directory\n";
+  } 
+  system( "git config user.name $name" ) if $name;
+  system( "git config user.email $email" ) if $email;
+  system( 'git add .' );
   my @git_add;
   my @git_remove;
+  
   open my $git_status, '-|', 'git status -s' or die $!;
   my $ctx = '';
   foreach(<$git_status>) {
@@ -85,13 +134,13 @@ sub backup{
     /^(?:\sD)\s(\S+)/o and push @git_remove, $1;
   } 
   close $git_status;
-  system(sprintf 'git add %s', join(' ', @git_add)) if @git_add;
-  system(sprintf 'git rm %s', join(' ', @git_remove)) if @git_remove;
-  system(sprintf 'git commit -m "backup: %s"', (localtime)->strftime('%Y-%m-%d %H:%M:%S'));
+
+  system( sprintf 'git add %s', join( ' ', @git_add ) ) if @git_add;
+  system( sprintf 'git rm %s', join( ' ', @git_remove ) ) if @git_remove;
+  system( sprintf 'git commit -m "backup: %s"', (localtime)->strftime('%Y-%m-%d %H:%M:%S') );
+  system( 'git push -u origin master' );
+  chdir $cwd;
 }
-
-
-
 
 
 
