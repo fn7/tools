@@ -49,18 +49,6 @@ unless (<STDIN> eq "y\n") {
   exit;
 }
 
-=cut
-my @EXCLUDE_PATTERNS = qw|
-  .*
-  ftpuser
-  system/images 
-  local/lib
-  local/var
-  local/man
-  misc/export
-|;
-=cut
-
 # バックアップを作成する
 my $basename = dir( $GIT_REPOSITORY )->basename;
 $basename =~ s/\.git$//;
